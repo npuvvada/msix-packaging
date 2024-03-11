@@ -37,14 +37,6 @@
       "label": "ms-resource:loc.input.label.vhdxOutputPath",
       "required": true,
       "helpMarkDown": "ms-resource:loc.input.help.vhdxOutputPath"
-    },
-    {
-      "name": "vhdxSize",
-      "type": "string",
-      "label": "ms-resource:loc.input.label.vhdxSize",
-      "defaultValue": "100",
-      "required": true,
-      "helpMarkDown": "ms-resource:loc.input.help.vhdxSize"
     }
   ]
 }

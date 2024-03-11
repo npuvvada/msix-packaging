@@ -5,23 +5,10 @@ import { ToolRunner } from 'azure-pipelines-task-lib/toolrunner';
 import helpers = require('common/helpers');
 
 import msbuild = require('./msbuild');
+import { platform } from 'os';
 
-/**
- * Reads the inputs needed for updating the app version in the manifest,
- * then edits it with the new version.
- */
-const updateAppVersionInManifest = async () =>
-{
-    // read the input
-    const manifestFile: string = helpers.getInputWithErrorCheck('manifestFile', 'To update the version of the app, the path to the manifest file is required to get the current version, but none was given.');
-
-    // get the new version
-    let newVersion: string = helpers.getInputWithErrorCheck('appVersion', 'To manually update the version of the app, a new version is required but none was given.');
-
-    const parsedManifest: any = await helpers.parseXml(manifestFile);
-    parsedManifest.Package.Identity[0].$.Version = newVersion;
-    helpers.writeXml(parsedManifest, manifestFile);
-}
+const HELPER_SCRIPT = path.join(__dirname, 'PublishAVD.ps1');
+const TARGET_DLL = path.join(__dirname, 'node_modules/common-helpers/lib/AppAttachFrameworkDLL/AppAttachKernel.dll');
 
 /**
  * Gets the list of platforms to build from the input.
@@ -49,109 +36,76 @@ const getPlatformsToBuild = (): string[] =>
 }
 
 /**
- * Reads the inputs for MSBuild and calls it to build the solution and
- * create the packages and bundle.
- * @param outputPath Save location for the produced package or bundle.
- * @param createBundle Whether we are creating a bundle or a package.
- */
-const setUpAndRunMSBuild = async (outputPath: string, createBundle: boolean) =>
-{
-    const msbuildCommonParameters: msbuild.MSBuildCommonParameters = msbuild.readMSBuildInputs();
-
-    if (createBundle)
-    {
-        const platformsToBuild: string[] = getPlatformsToBuild();
-        if (!platformsToBuild.length)
-        {
-            throw Error('No platform was specified to be built.');
-        }
-
-        await msbuild.runMSBuild(createBundle, outputPath, platformsToBuild,  msbuildCommonParameters);
-    }
-    else
-    {
-        const platform: string = helpers.getInputWithErrorCheck('buildPlatform', 'Platform to build is required.');
-        await msbuild.runMSBuild(createBundle, outputPath, [platform], msbuildCommonParameters);
-    }
-}
-
-/**
- * Package prebuilt binaries.
- * @param outputPath Save location for the generated package or bundle.
- * @param createBundle Whether to produce a bundle or a package.
- */
-const packageBuiltBinaries = async (outputPath: string, createBundle: boolean, inputDirectory: string) =>
-{
-    // The makemsix tool has a quirk where if the path ends with a slash, the tool
-    // will fail, so we detect this and work around this problem by removing the
-    // trailing slash if present
-    const lastChar: string = inputDirectory[inputDirectory.length - 1];
-    if (lastChar === '\\' || lastChar === '/')
-    {
-        console.log("inputDirectory ends with \\ trimming it...");
-        inputDirectory = inputDirectory.slice(0, -1);
-    }
-
-    if (!createBundle)
-    {
-        // TODO: Replace makeappx by makemsix to make it cross-platform
-        const makeAppxPackRunner: ToolRunner = tl.tool(helpers.MAKEAPPX_PATH);
-        makeAppxPackRunner.arg('pack');
-        makeAppxPackRunner.arg(['/o', '/v']);
-        makeAppxPackRunner.arg(['/d', inputDirectory]);
-        makeAppxPackRunner.arg(['/p', outputPath]);
-        await makeAppxPackRunner.exec();
-    }
-    else
-    {
-        const makeAppxBundleRunner: ToolRunner = tl.tool(helpers.MAKEAPPX_PATH);
-        makeAppxBundleRunner.arg('bundle');
-        makeAppxBundleRunner.arg(['/o', '/v']);
-        makeAppxBundleRunner.arg(['/d', inputDirectory]);
-        makeAppxBundleRunner.arg(['/p', outputPath]);
-        await makeAppxBundleRunner.exec();
-    }
-}
-
-/**
  * Main function for the task.
  */
 const run = async () =>
 {
     tl.setResourcePath(path.join(__dirname, 'task.json'));
 
+    const buildPackageConfig = new Map<string, string>();
+    buildPackageConfig.set("startValue", "BUILD");
+    buildPackageConfig.set("endValue", "GENERATE MSIX");
+    buildPackageConfig.set("clientName", helpers.CLIENT_TYPE);
+    buildPackageConfig.set("clientVersion", helpers.CLIENT_VERSION);
+
     // detect if the user will provide pre-built binaries or use MSBuild
     const buildSolution: boolean = tl.getBoolInput('buildSolution', /* required: */ true);
     let inputDirectory: string | undefined;
-    if (!buildSolution)
-    {
+    if (!buildSolution) {
         inputDirectory = helpers.getInputWithErrorCheck('inputDirectory', 'To package pre-built binaries, a path to the directory containing valid binaries is required, but none was given.');
+        buildPackageConfig.set("startValue", "GENERATE MSIX");
+        buildPackageConfig.set("inputPackageFilesDirectory", inputDirectory);
+        buildPackageConfig.set("makeappxPath", helpers.MAKEAPPX_PATH);
     }
 
     // read output path for the package or bundle.
     // resolve it to a full path to ensure it is the same in every place.
     // e.g. MSBuild seems to use the path relative to the solution dir in some cases.
     const outputPath: string = path.resolve(helpers.getInputWithErrorCheck('outputPath', 'An output path is required to save the package, but none was given.'));
+    buildPackageConfig.set("startValue", "GENERATE MSIX");
+    buildPackageConfig.set("packageLocation", path.dirname(outputPath));
+    buildPackageConfig.set("packageName",path.basename(outputPath));
 
     // whether to bundle or not is independent of whether or not to build from scratch
     // if the user gives the bundle option, check that they gave a path to save the output bundle.
     const generateBundle: boolean = tl.getBoolInput('generateBundle');
+    if (generateBundle) {
+        const platformsToBuild: string[] = getPlatformsToBuild();
+        if (!platformsToBuild.length) {
+            throw Error('No platform was specified to be built.');
+        }
+        buildPackageConfig.set("bundleFlag", generateBundle.toString());
+        buildPackageConfig.set("bundlePlatforms", platformsToBuild.join('|'));
+    }
+    else {
+        const platform: string = helpers.getInputWithErrorCheck('buildPlatform', 'Platform to build is required.');
+        buildPackageConfig.set("platform", platform);
+    }
 
     // update the app version in the manifest
     const updateAppVersion: boolean = tl.getBoolInput('updateAppVersion');
     if (updateAppVersion)
     {
-        await updateAppVersionInManifest();
+        // read the input
+        const manifestFile: string = helpers.getInputWithErrorCheck('manifestFile', 'To update the version of the app, the path to the manifest file is required to get the current version, but none was given.');
+        buildPackageConfig.set("appxManifestFile", manifestFile);
+
+        // get the new version
+        let newVersion: string = helpers.getInputWithErrorCheck('appVersion', 'To manually update the version of the app, a new version is required but none was given.');
+        buildPackageConfig.set("packageVersion", newVersion);
     }
 
-    // create the packages and bundle
-    if (buildSolution)
-    {
-        await setUpAndRunMSBuild(outputPath, generateBundle);
+    if (buildSolution) {
+        msbuild.setMSBuildInputs(buildPackageConfig);
     }
-    else
-    {
-        await packageBuiltBinaries(outputPath, generateBundle, inputDirectory!);
+
+    const powershellRunner: ToolRunner = helpers.getPowershellRunner(HELPER_SCRIPT);
+    powershellRunner.arg(['-inputJsonStr', '\'' + buildPackageConfig + '\'']);
+    powershellRunner.arg(['-targetDLL', TARGET_DLL]);
+
+    let execResult = await powershellRunner.execSync();
+    if (execResult.code) {
+        throw execResult.stderr;
     }
 }
 

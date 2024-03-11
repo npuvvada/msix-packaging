@@ -6,7 +6,5 @@
   "loc.input.label.package": "Package Path",
   "loc.input.help.package": "Path to the package.",
   "loc.input.label.vhdxOutputPath": "VHDX Output Path",
-  "loc.input.help.vhdxOutputPath": "The name of the VHDX file that will be created by the task.",
-  "loc.input.label.vhdxSize": "VHDX size (in MB)",
-  "loc.input.help.vhdxSize": "The maximum size in MBs of the VHDX."
+  "loc.input.help.vhdxOutputPath": "The name of the VHDX file that will be created by the task."
 }

@@ -37,14 +37,6 @@
       "label": "VHDX Output Path",
       "required": true,
       "helpMarkDown": "The name of the VHDX file that will be created by the task."
-    },
-    {
-      "name": "vhdxSize",
-      "type": "string",
-      "label": "VHDX size (in MB)",
-      "defaultValue": "100",
-      "required": true,
-      "helpMarkDown": "The maximum size in MBs of the VHDX."
     }
   ]
 }

@@ -7,6 +7,8 @@ import helpers = require('common/helpers');
 
 const MSIXMGR_PATH = path.join(__dirname, 'lib', 'msixmgr');
 const GENERATE_VHDX_SCRIPT_PATH = path.join(__dirname, 'GenerateAppAttachVhdx.ps1')
+const HELPER_SCRIPT = path.join(__dirname, 'PublishAVD.ps1');
+const TARGET_DLL = path.join(__dirname, 'node_modules/common-helpers/lib/AppAttachFrameworkDLL/AppAttachKernel.dll');
 
 /**
  * Main function for the task.
@@ -18,18 +20,27 @@ const run = async () =>
     // Read the task's inputs
     const packagePath: string = helpers.getInputWithErrorCheck('package', 'No package path specified.');
     const vhdxPath: string = helpers.getInputWithErrorCheck('vhdxOutputPath', 'A path is needed to create a new VHDX file, but none was given.');
-    const vhdxSize: string = helpers.getInputWithErrorCheck('vhdxSize', 'A size is needed to create a new VHDX file, but none was given.');
 
     // The script requires the command path to be absolute.
     const fullVhdxPath: string = path.resolve(vhdxPath);
-    const powershellRunner: ToolRunner = helpers.getPowershellRunner(GENERATE_VHDX_SCRIPT_PATH);
-    powershellRunner.arg(['-vhdxPath', fullVhdxPath]);
-    powershellRunner.arg(['-vhdxSize', vhdxSize]);
-    powershellRunner.arg(['-msixPackagePath', packagePath]);
-    powershellRunner.arg(['-msixmgrPath', MSIXMGR_PATH]);
+	const vhdxGenerationConfig = {
+		'startValue': 'GENERATE ARTIFACT',
+		'endValue': 'GENERATE ARTIFACT',
+		'packagePath': packagePath,
+        'imagePath': fullVhdxPath,
+		'msixManagerPath': MSIXMGR_PATH,
+        'clientType': helpers.CLIENT_TYPE,
+        'clientVersion': helpers.CLIENT_VERSION
+	}
+		
+    const powershellRunner: ToolRunner = helpers.getPowershellRunner(HELPER_SCRIPT);
+    powershellRunner.arg(['-inputJsonStr', '\'' + vhdxGenerationConfig + '\'']);
+    powershellRunner.arg(['-targetDLL', TARGET_DLL]);
 
-    // This script needs to be run as administrator.
-    await powershellRunner.exec();
+    let execResult = await powershellRunner.execSync();
+    if (execResult.code) {
+        throw execResult.stderr;
+    }
 }
 
 run().catch(err =>

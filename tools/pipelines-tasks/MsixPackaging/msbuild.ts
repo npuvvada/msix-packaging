@@ -5,33 +5,25 @@ import msbuildHelpers = require('azure-pipelines-tasks-msbuildhelpers');
 import { ToolRunner } from 'azure-pipelines-task-lib/toolrunner';
 
 import helpers = require('common/helpers');
-
-
 const MSBUILD_PATH_HELPER_SCRIPT = path.join(__dirname, 'GetMSBuildPath.ps1');
-
-export interface MSBuildCommonParameters
-{
-    solution: string;
-    configuration: string;
-    msbuildArguments: string;
-    appxPackageBuildMode: string,
-    clean: boolean;
-    msbuildLocationMethod: string;
-    msbuildLocation?: string;
-    msbuildVersion?: string;
-    msbuildArchitecture?: string;
-}
 
 /**
  * Reads the task's inputs related to MSBuild that are common to creating packages and bundle.
  */
-export const readMSBuildInputs = (): MSBuildCommonParameters =>
+export const setMSBuildInputs = async (buildPackageConfig: Map<string, string>): Promise<void> =>
 {
     const solution: string = helpers.getInputWithErrorCheck('solution', 'A path to a solution is required.');
+    buildPackageConfig.set("projectFilePath", solution);
     const configuration: string = helpers.getInputWithErrorCheck('buildConfiguration', 'Build configuration is required.');
-    const msbuildArguments: string = '/p:AppxPackageSigningEnabled=false';
+    buildPackageConfig.set("configuration", configuration);
+
     const clean: boolean = tl.getBoolInput('clean');
+    if (clean) {
+        buildPackageConfig.set("cleanFlag", "true");
+    }
     const appxPackageBuildMode: string = tl.getInput('appPackageDistributionMode') ?? 'SideloadOnly'
+    buildPackageConfig.set("appPackageDistributionMode", appxPackageBuildMode);
+
     const msbuildLocationMethod: string = helpers.getInputWithErrorCheck('msBuildLocationMethod', 'Method to locate MSBuild is required.');
 
     let msbuildVersion: string | undefined;
@@ -48,17 +40,8 @@ export const readMSBuildInputs = (): MSBuildCommonParameters =>
         msbuildLocation = helpers.getInputWithErrorCheck('msbuildLocation', 'Location of MSBuild.exe is required.');
     }
 
-    return {
-        solution,
-        configuration,
-        msbuildArguments,
-        appxPackageBuildMode,
-        clean,
-        msbuildLocationMethod,
-        msbuildLocation,
-        msbuildVersion,
-        msbuildArchitecture
-    };
+    const msbuildTool: string = msbuildLocationMethod === 'location' ? msbuildLocation! : await getMSBuildPathFromVersion(msbuildVersion!, msbuildArchitecture!);
+    buildPackageConfig.set("msbuildPath", msbuildTool);
 }
 
 const getMSBuildPathFromVersion = async (msbuildVersion: string, msbuildArchitecture: string): Promise<string> =>
@@ -88,75 +71,3 @@ const getMSBuildPathFromVersion = async (msbuildVersion: string, msbuildArchitec
     }
 }
 
-const getMSBuildToolRunner = (
-    msbuildToolPath: string,
-    solutionFile: string,
-    createBundle: boolean,
-    outputPath: string,
-    platforms: string[],
-    configuration: string,
-    msbuildArguments: string,
-    appxPackageBuildMode: string
-    ) : ToolRunner =>
-{
-    const buildTool: ToolRunner = tl.tool(msbuildToolPath);
-    buildTool.arg(solutionFile);
-
-    // If we don't specify a platform when bundling, MSBuild may use one we are not building and cause an error.
-    buildTool.arg('/p:Platform=' + platforms[0]);
-    buildTool.arg('/p:Configuration=' + configuration);
-
-    buildTool.arg('/p:UapAppxPackageBuildMode=' + appxPackageBuildMode);
-    if (msbuildArguments)
-    {
-        buildTool.line(msbuildArguments);
-    }
-
-    // Add arguments specific for bundles/packages
-    if (createBundle)
-    {
-        buildTool.arg('/p:AppxBundle=Always');
-        buildTool.arg('/p:AppxBundleOutput=' + outputPath);
-        buildTool.arg('/p:AppxBundlePlatforms=' + platforms.join('|'));
-    }
-    else
-    {
-        buildTool.arg('/p:AppxBundle=Never');
-        buildTool.arg('/p:AppxPackageOutput=' + outputPath);
-    }
-
-    return buildTool;
-}
-
-export const runMSBuild = async (
-    createBundle: boolean,
-    outputPath: string,
-    platforms: string[],
-    {
-        solution,
-        configuration,
-        msbuildArguments,
-        appxPackageBuildMode,
-        clean,
-        msbuildLocationMethod,
-        msbuildLocation,
-        msbuildVersion,
-        msbuildArchitecture,
-    }: MSBuildCommonParameters) =>
-{
-    const msbuildTool: string = msbuildLocationMethod === 'location' ? msbuildLocation! : await getMSBuildPathFromVersion(msbuildVersion!, msbuildArchitecture!);
-
-    const filesList: string[] = tl.findMatch('', solution, { followSymbolicLinks: false, followSpecifiedSymbolicLink: false, allowBrokenSymbolicLinks: false }, { matchBase: true });
-
-     // We only build a single file.
-     const file: string = filesList[0];
-    if (clean)
-    {
-        const cleanTool: ToolRunner = getMSBuildToolRunner(msbuildTool, file, createBundle, outputPath, platforms, configuration, msbuildArguments, appxPackageBuildMode);
-        cleanTool.arg('/t:Clean');
-        await cleanTool.exec();
-    }
-
-    const buildTool: ToolRunner = getMSBuildToolRunner(msbuildTool, file, createBundle, outputPath, platforms, configuration, msbuildArguments, appxPackageBuildMode);
-    await buildTool.exec();
-}

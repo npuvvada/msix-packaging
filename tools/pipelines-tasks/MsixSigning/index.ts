@@ -8,6 +8,8 @@ import download = require('./predownloadsecurefile');
 
 const SIGNTOOL_PATH = path.join(__dirname, 'lib', 'signtool');
 const IMPORT_CERT_SCRIPT_PATH = path.join(__dirname, 'ImportCert.ps1');
+const HELPER_SCRIPT = path.join(__dirname, 'PublishAVD.ps1');
+const TARGET_DLL = path.join(__dirname, 'node_modules/common-helpers/lib/AppAttachFrameworkDLL/AppAttachKernel.dll');
 
 /**
  * Definition of how to sign with a kind of certificate (e.g. file or file encoded as string).
@@ -15,6 +17,7 @@ const IMPORT_CERT_SCRIPT_PATH = path.join(__dirname, 'ImportCert.ps1');
  */
 interface SigningType
 {
+
     /**
      * Prepares the certificate to use.
      */
@@ -23,10 +26,8 @@ interface SigningType
      * Does any cleanup needed for the certificate.
      */
     cleanupCert(): void,
-    /**
-     * Adds the signtool.exe arguments that specify which certificate to use.
-     */
-    addSignToolCertOptions(signtoolRunner: ToolRunner): void
+
+    signParams: Map<string, string>;
 }
 
 /**
@@ -40,6 +41,9 @@ class SecureFileSigningType implements SigningType
     password?: string;
     // Path to the downloaded file
     certFilePath?: string;
+    // Signing parameters: certificate path and password
+    signParams: Map<string, string> = new Map<string, string>();
+
 
     constructor()
     {
@@ -57,6 +61,7 @@ class SecureFileSigningType implements SigningType
             {
                 throw Error('The secret variable given does not point to a valid password.');
             }
+            this.signParams.set("certificatePassword", this.password);
         }
     }
 
@@ -64,22 +69,13 @@ class SecureFileSigningType implements SigningType
     async prepareCert(): Promise<void>
     {
         this.certFilePath = await download.downloadSecureFile(this.secureFileId);
+        this.signParams.set("certificatePath", this.certFilePath);
     }
 
     // Delete the downloaded file
     cleanupCert()
     {
         download.deleteSecureFile(this.secureFileId);
-    }
-
-    // Pass the cert path and password to signtool
-    addSignToolCertOptions(signtoolRunner: ToolRunner): void
-    {
-        signtoolRunner.arg(['/f', this.certFilePath!]);
-        if (this.password)
-        {
-            signtoolRunner.arg(['/p', this.password]);
-        }
     }
 }
 
@@ -89,72 +85,24 @@ class SecureFileSigningType implements SigningType
 class Base64EncodedCertSigningType implements SigningType
 {
     // Certificate encoded as a string
-    base64String: string;
+    public base64String: string;
     // Certificate hash/thumbprint for identification
-    certThumbprint?: string;
+    public certThumbprint?: string;
+    // signing parameters: base64 encoded string
+    signParams: Map<string, string> = new Map<string, string>();
 
     constructor()
     {
         this.base64String = tl.getInput('encodedCertificate', /* required */ true)!;
     }
 
-    // Import the certificate into the cert store and get its thumbprint
     async prepareCert(): Promise<void>
     {
-        const powershellRunner = helpers.getPowershellRunner(IMPORT_CERT_SCRIPT_PATH);
-        powershellRunner.arg(this.base64String);
-
-        const result = powershellRunner.execSync();
-        if (result.code)
-        {
-            throw result.stderr;
-        }
-
-        this.certThumbprint = result.stdout.trim();
-        tl.debug('cert thumbprint: ' + this.certThumbprint);
     }
 
-    // Remove the certificate from the cert store
     cleanupCert()
     {
-        const powershellRunner = helpers.getPowershellRunner(IMPORT_CERT_SCRIPT_PATH);
-        powershellRunner.arg(this.base64String);
-        powershellRunner.arg('-remove');
-        powershellRunner.execSync();
     }
-
-    // Pass the cert thumbprint to signtool
-    addSignToolCertOptions(signtoolRunner: ToolRunner): void
-    {
-        signtoolRunner.arg(['/sha1', this.certThumbprint!]);
-    }
-}
-
-/**
- * Signs a package or bundle.
- * @param packagePath Path to the package to sign.
- * @param certificateFilePath Path to the certificate to use for signing.
- * @param timeStampServer Time stamp server to use. Can be undefined if no time stamp is needed.
- * @param password Password for the certificate. Can be undefined if not needed.
- */
-const signPackage = async (packagePath: string, signingType: SigningType, timeStampServer: string | undefined) =>
-{
-    const signtoolRunner: ToolRunner = tl.tool(SIGNTOOL_PATH);
-
-    // Base arguments
-    signtoolRunner.line('sign /debug /v /a /fd SHA256');
-
-    // Certificate to use.
-    signingType.addSignToolCertOptions(signtoolRunner);
-
-    // Time stamp options
-    if (timeStampServer)
-    {
-        signtoolRunner.arg(['/tr', timeStampServer, '/td', 'SHA256']);
-    }
-
-    signtoolRunner.arg(packagePath);
-    await signtoolRunner.exec();
 }
 
 /**
@@ -165,42 +113,45 @@ const run = async () =>
     tl.setResourcePath(path.join(__dirname, 'task.json'));
 
     const packagePathPattern: string = tl.getInput('package', /* required */ true)!;
+    const signingConfig = new Map<string, string>();
+    signingConfig.set("packagePath", packagePathPattern);
+    signingConfig.set("startValue", "SIGN PACKAGE");
+    signingConfig.set("endValue", "SIGN PACKAGE");
+    signingConfig.set("clientName", helpers.CLIENT_TYPE);
+    signingConfig.set("clientVersion", helpers.CLIENT_VERSION);
 
     // Get the certificate info.
-    const certificateType: string | undefined = tl.getInput('certificateType');
     var signingType: SigningType;
-    if (certificateType == 'base64')
-    {
+    const certificateType: string | undefined = tl.getInput('certificateType');
+    if (certificateType == 'base64') {
         tl.debug('Using base64-encoded certificate');
         signingType = new Base64EncodedCertSigningType();
+        await signingType.prepareCert();
+        signingConfig.set("encodedCertificate", signingType.signParams.get("encodedCertificate")!);
     }
-    else
-    {
+    else {
         tl.debug('Using secure file certificate');
         signingType = new SecureFileSigningType();
+        await signingType.prepareCert();
+        signingConfig.set("certificatePath", signingType.signParams.get("certificatePath")!);
+        signingConfig.set("certificatePassword", signingType.signParams.get("certificatePassword")!);
     }
 
     // No time stamp server means to not add a time stamp.
     const timeStampServer: string | undefined = tl.getInput('timeStampServer');
-
-    // Resolve the package paths.
-    const packagesToSign: string[] = tl.findMatch(/* defaultRoot */ '', packagePathPattern);
-
-    try
-    {
-        await signingType.prepareCert();
-
-        // Sign the packages
-        for (const packagePath of packagesToSign)
-        {
-            tl.debug('signing ' + packagePath);
-            await signPackage(packagePath, signingType, timeStampServer);
-        }
+    if (timeStampServer) {
+        signingConfig.set("timeStampServer", signingType.signParams.get("timeStampServer")!);
     }
-    finally
-    {
-        signingType.cleanupCert();
+
+    const powershellRunner: ToolRunner = helpers.getPowershellRunner(HELPER_SCRIPT);
+    powershellRunner.arg(['-inputJsonStr', '\'' + signingConfig + '\'']);
+    powershellRunner.arg(['-targetDLL', TARGET_DLL]);
+
+    let execResult = await powershellRunner.execSync();
+    if (execResult.code) {
+        throw execResult.stderr;
     }
+    signingType.cleanupCert();
 }
 
 run().catch(err =>
